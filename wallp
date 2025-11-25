@@ -1,0 +1,761 @@
+#!/bin/bash
+
+# wallp - Wallpaper Control Utility for macOS
+# An interactive, beautiful wallpaper manager
+
+WALLPAPER_DIR="$HOME/Desktop/wallpapers"
+STATE_FILE="$HOME/.wallp_state"
+SCHEDULE_FILE="$HOME/.wallp_schedule"
+CACHE_DIR="$HOME/.cache/wallp"
+
+# Colors and formatting
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# Icons (Unicode)
+ICON_IMAGE="🖼 "
+ICON_FOLDER="📁 "
+ICON_CLOCK="⏰ "
+ICON_CHECK="✓"
+ICON_CROSS="✗"
+ICON_ARROW="→"
+ICON_STAR="★"
+ICON_RANDOM="🎲 "
+
+mkdir -p "$CACHE_DIR"
+
+# Banner
+show_banner() {
+    cat << "EOF"
+╔══════════════════════════════════════════╗
+║   🎨  Wallpaper Control (wallp) 🎨      ║
+║     Beautiful wallpaper management       ║
+╚══════════════════════════════════════════╝
+EOF
+    echo ""
+}
+
+# Function to check if command exists
+has_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Function to detect terminal image support
+detect_image_support() {
+    if [ "$TERM_PROGRAM" = "iTerm.app" ]; then
+        echo "iterm2"
+    elif [ "$TERM" = "xterm-kitty" ]; then
+        echo "kitty"
+    elif has_command "imgcat"; then
+        echo "imgcat"
+    elif has_command "timg"; then
+        echo "timg"
+    elif has_command "viu"; then
+        echo "viu"
+    else
+        echo "none"
+    fi
+}
+
+# Function to show image preview
+show_preview() {
+    local image="$1"
+    local method="${2:-$(detect_image_support)}"
+    local width="${3:-40}"
+
+    case "$method" in
+        iterm2)
+            printf '\033]1337;File=inline=1;width=%dpx:' "$((width * 12))"
+            base64 < "$image"
+            printf '\a\n'
+            ;;
+        kitty)
+            kitty +kitten icat --align left --scale-up "$image" 2>/dev/null
+            ;;
+        imgcat)
+            imgcat -W "$width" "$image" 2>/dev/null
+            ;;
+        timg)
+            timg -W "$width" -p q "$image" 2>/dev/null
+            ;;
+        viu)
+            viu -w "$width" "$image" 2>/dev/null
+            ;;
+        *)
+            echo -e "${DIM}[Image preview not available]${NC}"
+            ;;
+    esac
+}
+
+# Function to get image dimensions
+get_dimensions() {
+    local image="$1"
+    if has_command "sips"; then
+        local width=$(sips -g pixelWidth "$image" 2>/dev/null | awk '/pixelWidth:/ {print $2}')
+        local height=$(sips -g pixelHeight "$image" 2>/dev/null | awk '/pixelHeight:/ {print $2}')
+        echo "${width}x${height}"
+    else
+        echo "unknown"
+    fi
+}
+
+# Function to get file size in human readable format
+human_size() {
+    local size="$1"
+    if [ "$size" -lt 1024 ]; then
+        echo "${size}B"
+    elif [ "$size" -lt 1048576 ]; then
+        echo "$((size / 1024))KB"
+    else
+        echo "$((size / 1048576))MB"
+    fi
+}
+
+# Function to show usage
+usage() {
+    show_banner
+    echo -e "${BOLD}USAGE:${NC}"
+    echo -e "    wallp ${GREEN}browse${NC}                   ${DIM}Interactive wallpaper browser with previews${NC}"
+    echo -e "    wallp ${GREEN}gallery${NC}                  ${DIM}Show gallery view of all wallpapers${NC}"
+    echo -e "    wallp ${GREEN}list${NC} [pattern]           ${DIM}List all wallpapers (optional filter)${NC}"
+    echo -e "    wallp ${GREEN}set${NC} <path|number>        ${DIM}Set wallpaper by path or list number${NC}"
+    echo -e "    wallp ${GREEN}random${NC} [subfolder]       ${DIM}Set random wallpaper${NC}"
+    echo -e "    wallp ${GREEN}next${NC}                     ${DIM}Cycle to next wallpaper${NC}"
+    echo -e "    wallp ${GREEN}prev${NC}                     ${DIM}Cycle to previous wallpaper${NC}"
+    echo -e "    wallp ${GREEN}current${NC}                  ${DIM}Show current wallpaper with preview${NC}"
+    echo -e "    wallp ${GREEN}info${NC} <path|number>       ${DIM}Show detailed info about wallpaper${NC}"
+    echo -e "    wallp ${GREEN}schedule${NC} <interval>      ${DIM}Schedule changes (e.g., 30m, 1h, 2h)${NC}"
+    echo -e "    wallp ${GREEN}schedule stop${NC}            ${DIM}Stop scheduled changes${NC}"
+    echo -e "    wallp ${GREEN}schedule status${NC}          ${DIM}Show schedule status${NC}"
+    echo -e "    wallp ${GREEN}folders${NC}                  ${DIM}List available subfolders${NC}"
+    echo -e "    wallp ${GREEN}stats${NC}                    ${DIM}Show wallpaper collection statistics${NC}"
+    echo -e "    wallp ${GREEN}help${NC}                     ${DIM}Show this help message${NC}"
+    echo ""
+    echo -e "${BOLD}EXAMPLES:${NC}"
+    echo -e "    wallp browse                    ${DIM}# Open interactive browser${NC}"
+    echo -e "    wallp list nature               ${DIM}# Filter wallpapers by 'nature'${NC}"
+    echo -e "    wallp set 5                     ${DIM}# Set wallpaper #5 from list${NC}"
+    echo -e "    wallp random mountains          ${DIM}# Random wallpaper from 'mountains' folder${NC}"
+    echo -e "    wallp schedule 30m              ${DIM}# Auto-change every 30 minutes${NC}"
+    echo -e "    wallp info 3                    ${DIM}# Show info for wallpaper #3${NC}"
+    echo ""
+    echo -e "${BOLD}INTERACTIVE CONTROLS:${NC}"
+    echo -e "    ${DIM}In browse mode (if fzf available):${NC}"
+    echo -e "    ${CYAN}↑/↓${NC} or ${CYAN}j/k${NC}     Navigate"
+    echo -e "    ${CYAN}Enter${NC}           Set wallpaper"
+    echo -e "    ${CYAN}Ctrl+C${NC}          Exit"
+    echo ""
+}
+
+# Function to get all wallpapers
+get_wallpapers() {
+    local pattern="${1:-}"
+    if [ -z "$pattern" ]; then
+        find "$WALLPAPER_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" \) 2>/dev/null | sort
+    else
+        find "$WALLPAPER_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" \) 2>/dev/null | grep -i "$pattern" | sort
+    fi
+}
+
+# Function to list wallpapers with fancy formatting
+list_wallpapers() {
+    local pattern="${1:-}"
+
+    show_banner
+    echo -e "${BOLD}${ICON_IMAGE}Available wallpapers:${NC}"
+    echo ""
+
+    local count=1
+    while IFS= read -r wallpaper; do
+        local relative_path="${wallpaper#$WALLPAPER_DIR/}"
+        local filename=$(basename "$wallpaper")
+        local dir=$(dirname "$relative_path")
+
+        # Color code by subdirectory
+        local color="$GREEN"
+        if [ "$dir" != "." ]; then
+            echo -e "${DIM}${ICON_FOLDER}${dir}/${NC}"
+        fi
+
+        local size=$(stat -f%z "$wallpaper" 2>/dev/null || echo 0)
+        local size_human=$(human_size "$size")
+
+        echo -e "  ${CYAN}[$count]${NC} ${BOLD}$filename${NC} ${DIM}($size_human)${NC}"
+        ((count++))
+    done < <(get_wallpapers "$pattern")
+
+    if [ $count -eq 1 ]; then
+        echo -e "${RED}${ICON_CROSS} No wallpapers found${NC}"
+        return 1
+    fi
+
+    echo ""
+    echo -e "${DIM}Total: $((count - 1)) wallpapers${NC}"
+    echo -e "${DIM}Tip: Use 'wallpbrowse' for interactive selection with previews${NC}"
+}
+
+# Function to browse wallpapers interactively with fzf
+browse_wallpapers() {
+    if ! has_command "fzf"; then
+        echo -e "${YELLOW}⚠ fzf not installed. Falling back to list mode.${NC}"
+        echo -e "${DIM}Install fzf for interactive browsing: brew install fzf${NC}"
+        echo ""
+        list_wallpapers
+        return 1
+    fi
+
+    local preview_method=$(detect_image_support)
+    local preview_cmd=""
+
+    if [ "$preview_method" != "none" ]; then
+        preview_cmd="$0 info {1}"
+    else
+        preview_cmd="echo 'Preview not available'; echo ''; stat -f'Size: %z bytes' {1}; echo ''; echo 'Path:'; echo {1}"
+    fi
+
+    local wallpapers=($(get_wallpapers))
+    if [ ${#wallpapers[@]} -eq 0 ]; then
+        echo -e "${RED}No wallpapers found${NC}"
+        return 1
+    fi
+
+    show_banner
+    echo -e "${CYAN}${ICON_IMAGE} Interactive Wallpaper Browser${NC}"
+    echo -e "${DIM}Use ↑/↓ to navigate, Enter to select, Ctrl+C to exit${NC}"
+    echo ""
+
+    # Create numbered list for fzf
+    local temp_list=$(mktemp)
+    local count=1
+    for wallpaper in "${wallpapers[@]}"; do
+        local relative="${wallpaper#$WALLPAPER_DIR/}"
+        echo "$wallpaper|[$count] $relative"
+        ((count++))
+    done > "$temp_list"
+
+    # Run fzf with preview
+    local selected=$(cat "$temp_list" | \
+        awk -F'|' '{print $1}' | \
+        fzf --ansi \
+            --preview="$preview_cmd" \
+            --preview-window=right:50%:wrap \
+            --height=100% \
+            --border=rounded \
+            --prompt="Select wallpaper > " \
+            --header="Press ENTER to set wallpaper, ESC to cancel" \
+            --color="fg:#ffffff,bg:#000000,hl:#5fff87" \
+            --color="fg+:#ffffff,bg+:#262626,hl+:#5fff87" \
+            --color="info:#af87ff,prompt:#5fff87,pointer:#ff87d7" \
+            --color="marker:#ff87d7,spinner:#5fff87,header:#5fff87")
+
+    rm "$temp_list"
+
+    if [ -n "$selected" ]; then
+        set_wallpaper "$selected"
+    else
+        echo -e "${YELLOW}No wallpaper selected${NC}"
+    fi
+}
+
+# Function to show wallpaper info
+show_info() {
+    local wallpaper="$1"
+
+    if [ ! -f "$wallpaper" ]; then
+        echo -e "${RED}Wallpaper not found${NC}"
+        return 1
+    fi
+
+    local filename=$(basename "$wallpaper")
+    local relative="${wallpaper#$WALLPAPER_DIR/}"
+    local size=$(stat -f%z "$wallpaper" 2>/dev/null || echo 0)
+    local size_human=$(human_size "$size")
+    local dims=$(get_dimensions "$wallpaper")
+    local modified=$(stat -f%Sm -t"%Y-%m-%d %H:%M" "$wallpaper" 2>/dev/null || echo "unknown")
+
+    # Show preview if supported
+    local preview_method=$(detect_image_support)
+    if [ "$preview_method" != "none" ]; then
+        show_preview "$wallpaper" "$preview_method" 40
+        echo ""
+    fi
+
+    echo -e "${BOLD}${ICON_IMAGE} Wallpaper Info${NC}"
+    echo -e "${DIM}═══════════════════════════════════${NC}"
+    echo -e "${CYAN}Name:${NC}       $filename"
+    echo -e "${CYAN}Path:${NC}       $relative"
+    echo -e "${CYAN}Size:${NC}       $size_human"
+    echo -e "${CYAN}Dimensions:${NC} $dims"
+    echo -e "${CYAN}Modified:${NC}   $modified"
+    echo ""
+}
+
+# Function to show gallery view
+show_gallery() {
+    show_banner
+    echo -e "${BOLD}${ICON_IMAGE} Wallpaper Gallery${NC}"
+    echo ""
+
+    local preview_method=$(detect_image_support)
+    if [ "$preview_method" = "none" ]; then
+        echo -e "${YELLOW}Image preview not available in this terminal${NC}"
+        echo -e "${DIM}For best experience, use iTerm2, Kitty, or install: brew install timg${NC}"
+        echo ""
+        list_wallpapers
+        return
+    fi
+
+    local count=1
+    while IFS= read -r wallpaper; do
+        local relative="${wallpaper#$WALLPAPER_DIR/}"
+        local filename=$(basename "$wallpaper")
+
+        echo -e "${CYAN}[$count]${NC} ${BOLD}$filename${NC}"
+        echo -e "${DIM}$relative${NC}"
+        show_preview "$wallpaper" "$preview_method" 30
+        echo ""
+        ((count++))
+
+        # Pause every 3 images
+        if [ $((count % 4)) -eq 0 ]; then
+            echo -e "${DIM}Press Enter to continue, Ctrl+C to exit...${NC}"
+            read -r
+        fi
+    done < <(get_wallpapers)
+}
+
+# Function to list folders
+list_folders() {
+    show_banner
+    echo -e "${BOLD}${ICON_FOLDER} Wallpaper Folders:${NC}"
+    echo ""
+
+    local count=0
+    while IFS= read -r folder; do
+        if [ "$folder" != "$WALLPAPER_DIR" ]; then
+            local relative_path="${folder#$WALLPAPER_DIR/}"
+            local num_images=$(find "$folder" -maxdepth 1 -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" \) 2>/dev/null | wc -l)
+            echo -e "${GREEN}${ICON_FOLDER}${NC} ${BOLD}$relative_path${NC} ${DIM}($num_images images)${NC}"
+            ((count++))
+        fi
+    done < <(find "$WALLPAPER_DIR" -type d | sort)
+
+    if [ $count -eq 0 ]; then
+        echo -e "${DIM}No subfolders found${NC}"
+    fi
+    echo ""
+}
+
+# Function to show statistics
+show_stats() {
+    show_banner
+    echo -e "${BOLD}📊 Collection Statistics${NC}"
+    echo ""
+
+    local total=$(get_wallpapers | wc -l | tr -d ' ')
+    local total_size=0
+
+    while IFS= read -r wallpaper; do
+        local size=$(stat -f%z "$wallpaper" 2>/dev/null || echo 0)
+        total_size=$((total_size + size))
+    done < <(get_wallpapers)
+
+    local total_size_human=$(human_size "$total_size")
+    local num_folders=$(find "$WALLPAPER_DIR" -type d | wc -l | tr -d ' ')
+    num_folders=$((num_folders - 1))
+
+    echo -e "${CYAN}Total wallpapers:${NC}  $total"
+    echo -e "${CYAN}Total size:${NC}        $total_size_human"
+    echo -e "${CYAN}Folders:${NC}           $num_folders"
+    echo -e "${CYAN}Storage location:${NC}  $WALLPAPER_DIR"
+
+    # Show largest wallpaper
+    local largest=$(find "$WALLPAPER_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" \) -exec stat -f'%z %N' {} \; 2>/dev/null | sort -rn | head -1)
+    if [ -n "$largest" ]; then
+        local largest_size=$(echo "$largest" | awk '{print $1}')
+        local largest_file=$(echo "$largest" | cut -d' ' -f2-)
+        local largest_name=$(basename "$largest_file")
+        echo -e "${CYAN}Largest file:${NC}      $largest_name ($(human_size "$largest_size"))"
+    fi
+
+    echo ""
+
+    # Show folder breakdown
+    if [ $num_folders -gt 0 ]; then
+        echo -e "${BOLD}Breakdown by folder:${NC}"
+        while IFS= read -r folder; do
+            if [ "$folder" != "$WALLPAPER_DIR" ]; then
+                local relative="${folder#$WALLPAPER_DIR/}"
+                local count=$(find "$folder" -maxdepth 1 -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" \) 2>/dev/null | wc -l | tr -d ' ')
+                if [ "$count" -gt 0 ]; then
+                    local bar_length=$((count * 30 / total))
+                    local bar=$(printf '█%.0s' $(seq 1 $bar_length))
+                    echo -e "  ${GREEN}$relative:${NC} $bar ${DIM}$count${NC}"
+                fi
+            fi
+        done < <(find "$WALLPAPER_DIR" -type d | sort)
+    fi
+
+    echo ""
+}
+
+# Function to set wallpaper
+set_wallpaper() {
+    local wallpaper_path="$1"
+
+    if [ ! -f "$wallpaper_path" ]; then
+        echo -e "${RED}${ICON_CROSS} Error: Wallpaper file not found${NC}"
+        return 1
+    fi
+
+    osascript -e "tell application \"System Events\" to tell every desktop to set picture to \"$wallpaper_path\"" 2>/dev/null
+
+    if [ $? -eq 0 ]; then
+        echo "$wallpaper_path" > "$STATE_FILE"
+        local filename=$(basename "$wallpaper_path")
+        echo ""
+        echo -e "${GREEN}${ICON_CHECK} Wallpaper set successfully!${NC}"
+        echo -e "${BOLD}$filename${NC}"
+        echo ""
+        return 0
+    else
+        echo -e "${RED}${ICON_CROSS} Error: Failed to set wallpaper${NC}"
+        return 1
+    fi
+}
+
+# Function to set wallpaper by number
+set_by_number() {
+    local number="$1"
+    local count=1
+
+    while IFS= read -r wallpaper; do
+        if [ $count -eq "$number" ]; then
+            set_wallpaper "$wallpaper"
+            return $?
+        fi
+        ((count++))
+    done < <(get_wallpapers)
+
+    echo -e "${RED}${ICON_CROSS} Error: Invalid wallpaper number: $number${NC}"
+    return 1
+}
+
+# Function to set random wallpaper
+set_random() {
+    local pattern="${1:-}"
+    local wallpapers=($(get_wallpapers "$pattern"))
+
+    if [ ${#wallpapers[@]} -eq 0 ]; then
+        echo -e "${RED}No wallpapers found${NC}"
+        return 1
+    fi
+
+    local random_index=$((RANDOM % ${#wallpapers[@]}))
+    echo -e "${CYAN}${ICON_RANDOM}Selecting random wallpaper...${NC}"
+    set_wallpaper "${wallpapers[$random_index]}"
+}
+
+# Function to get current wallpaper
+get_current() {
+    show_banner
+
+    if [ -f "$STATE_FILE" ]; then
+        local current=$(cat "$STATE_FILE")
+        if [ -f "$current" ]; then
+            echo -e "${BOLD}${ICON_STAR} Current Wallpaper:${NC}"
+            echo ""
+            show_info "$current"
+            return 0
+        fi
+    fi
+
+    echo -e "${YELLOW}No wallpaper set via wallp yet${NC}"
+    return 1
+}
+
+# Function to cycle to next wallpaper
+next_wallpaper() {
+    local wallpapers=($(get_wallpapers))
+
+    if [ ${#wallpapers[@]} -eq 0 ]; then
+        echo -e "${RED}No wallpapers found${NC}"
+        return 1
+    fi
+
+    local current=""
+    if [ -f "$STATE_FILE" ]; then
+        current=$(cat "$STATE_FILE")
+    fi
+
+    local next_index=0
+    if [ -n "$current" ]; then
+        for i in "${!wallpapers[@]}"; do
+            if [ "${wallpapers[$i]}" = "$current" ]; then
+                next_index=$(( (i + 1) % ${#wallpapers[@]} ))
+                break
+            fi
+        done
+    fi
+
+    echo -e "${CYAN}${ICON_ARROW} Next wallpaper...${NC}"
+    set_wallpaper "${wallpapers[$next_index]}"
+}
+
+# Function to cycle to previous wallpaper
+prev_wallpaper() {
+    local wallpapers=($(get_wallpapers))
+
+    if [ ${#wallpapers[@]} -eq 0 ]; then
+        echo -e "${RED}No wallpapers found${NC}"
+        return 1
+    fi
+
+    local current=""
+    if [ -f "$STATE_FILE" ]; then
+        current=$(cat "$STATE_FILE")
+    fi
+
+    local prev_index=$(( ${#wallpapers[@]} - 1 ))
+    if [ -n "$current" ]; then
+        for i in "${!wallpapers[@]}"; do
+            if [ "${wallpapers[$i]}" = "$current" ]; then
+                prev_index=$(( (i - 1 + ${#wallpapers[@]}) % ${#wallpapers[@]} ))
+                break
+            fi
+        done
+    fi
+
+    echo -e "${CYAN}${ICON_ARROW} Previous wallpaper...${NC}"
+    set_wallpaper "${wallpapers[$prev_index]}"
+}
+
+# Function to convert interval to seconds
+interval_to_seconds() {
+    local interval="$1"
+    local value="${interval%[a-z]*}"
+    local unit="${interval#$value}"
+
+    case "$unit" in
+        s) echo $value ;;
+        m) echo $((value * 60)) ;;
+        h) echo $((value * 3600)) ;;
+        d) echo $((value * 86400)) ;;
+        *) echo 0 ;;
+    esac
+}
+
+# Function to schedule wallpaper changes
+schedule_wallpapers() {
+    local interval="$1"
+    local seconds=$(interval_to_seconds "$interval")
+
+    if [ $seconds -eq 0 ]; then
+        echo -e "${RED}${ICON_CROSS} Error: Invalid interval format${NC}"
+        echo -e "${DIM}Use: 30s, 5m, 1h, 1d${NC}"
+        return 1
+    fi
+
+    local plist_file="$HOME/Library/LaunchAgents/com.wallp.schedule.plist"
+    local script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    cat > "$plist_file" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wallp.schedule</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$script_path</string>
+        <string>random</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>$seconds</integer>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+EOF
+
+    launchctl unload "$plist_file" 2>/dev/null
+    launchctl load "$plist_file"
+
+    if [ $? -eq 0 ]; then
+        echo "$interval" > "$SCHEDULE_FILE"
+        echo ""
+        echo -e "${GREEN}${ICON_CHECK} Schedule created successfully!${NC}"
+        echo -e "${ICON_CLOCK} Wallpaper will change every ${BOLD}$interval${NC}"
+        echo ""
+        return 0
+    else
+        echo -e "${RED}${ICON_CROSS} Error: Failed to create schedule${NC}"
+        return 1
+    fi
+}
+
+# Function to stop scheduled wallpaper changes
+stop_schedule() {
+    local plist_file="$HOME/Library/LaunchAgents/com.wallp.schedule.plist"
+
+    if [ -f "$plist_file" ]; then
+        launchctl unload "$plist_file" 2>/dev/null
+        rm "$plist_file"
+        rm -f "$SCHEDULE_FILE"
+        echo ""
+        echo -e "${GREEN}${ICON_CHECK} Schedule stopped${NC}"
+        echo ""
+    else
+        echo -e "${YELLOW}No active schedule found${NC}"
+    fi
+}
+
+# Function to show schedule status
+schedule_status() {
+    local plist_file="$HOME/Library/LaunchAgents/com.wallp.schedule.plist"
+
+    show_banner
+    echo -e "${BOLD}${ICON_CLOCK} Schedule Status${NC}"
+    echo ""
+
+    if [ -f "$plist_file" ] && [ -f "$SCHEDULE_FILE" ]; then
+        local interval=$(cat "$SCHEDULE_FILE")
+        echo -e "${GREEN}${ICON_CHECK} Schedule active${NC}"
+        echo -e "${CYAN}Interval:${NC} $interval"
+        echo ""
+
+        launchctl list | grep -q "com.wallp.schedule"
+        if [ $? -eq 0 ]; then
+            echo -e "${CYAN}Status:${NC} ${GREEN}Running${NC}"
+        else
+            echo -e "${CYAN}Status:${NC} ${RED}Not running${NC}"
+            echo -e "${DIM}Run 'wallpschedule stop' and try again${NC}"
+        fi
+    else
+        echo -e "${YELLOW}No active schedule${NC}"
+        echo -e "${DIM}Use 'wallpschedule <interval>' to create one${NC}"
+    fi
+    echo ""
+}
+
+# Main command dispatcher
+main() {
+    if [ ! -d "$WALLPAPER_DIR" ]; then
+        echo -e "${RED}${ICON_CROSS} Error: Wallpaper directory not found${NC}"
+        echo -e "${CYAN}Expected location:${NC} $WALLPAPER_DIR"
+        echo ""
+        echo -e "${DIM}Create the directory with:${NC}"
+        echo -e "  mkdir -p $WALLPAPER_DIR"
+        echo ""
+        exit 1
+    fi
+
+    case "${1:-help}" in
+        browse|b)
+            browse_wallpapers
+            ;;
+        gallery|g)
+            show_gallery
+            ;;
+        list|ls|l)
+            list_wallpapers "${2:-}"
+            ;;
+        set|s)
+            if [ -z "$2" ]; then
+                echo -e "${RED}${ICON_CROSS} Error: Missing wallpaper path or number${NC}"
+                exit 1
+            fi
+
+            if [[ "$2" =~ ^[0-9]+$ ]]; then
+                set_by_number "$2"
+            elif [ -f "$2" ]; then
+                set_wallpaper "$2"
+            else
+                local full_path="$WALLPAPER_DIR/$2"
+                if [ -f "$full_path" ]; then
+                    set_wallpaper "$full_path"
+                else
+                    echo -e "${RED}${ICON_CROSS} Error: Wallpaper not found: $2${NC}"
+                    exit 1
+                fi
+            fi
+            ;;
+        random|r)
+            set_random "${2:-}"
+            ;;
+        next|n)
+            next_wallpaper
+            ;;
+        prev|p)
+            prev_wallpaper
+            ;;
+        current|c)
+            get_current
+            ;;
+        info|i)
+            if [ -z "$2" ]; then
+                echo -e "${RED}${ICON_CROSS} Error: Missing wallpaper path or number${NC}"
+                exit 1
+            fi
+
+            if [[ "$2" =~ ^[0-9]+$ ]]; then
+                local count=1
+                while IFS= read -r wallpaper; do
+                    if [ $count -eq "$2" ]; then
+                        show_info "$wallpaper"
+                        exit 0
+                    fi
+                    ((count++))
+                done < <(get_wallpapers)
+                echo -e "${RED}${ICON_CROSS} Invalid number${NC}"
+            else
+                show_info "$2"
+            fi
+            ;;
+        folders|f)
+            list_folders
+            ;;
+        stats)
+            show_stats
+            ;;
+        schedule|sched)
+            case "${2:-}" in
+                stop)
+                    stop_schedule
+                    ;;
+                status)
+                    schedule_status
+                    ;;
+                "")
+                    echo -e "${RED}${ICON_CROSS} Error: Missing interval${NC}"
+                    echo -e "${DIM}Usage: wc schedule <interval> (e.g., 30m, 1h)${NC}"
+                    exit 1
+                    ;;
+                *)
+                    schedule_wallpapers "$2"
+                    ;;
+            esac
+            ;;
+        help|--help|-h|"")
+            usage
+            ;;
+        *)
+            echo -e "${RED}${ICON_CROSS} Error: Unknown command: $1${NC}"
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
